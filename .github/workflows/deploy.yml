@@ -1,0 +1,73 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v2
+
+      - name: Get GitHub Actions runner IP
+        id: get_ip
+        run: echo "IP=$(curl -s http://checkip.amazonaws.com)" >> $GITHUB_ENV
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ap-northeast-2
+
+      - name: Allow GitHub Actions IP in security group
+        run: |
+          IP=$(curl -s http://checkip.amazonaws.com)
+          aws ec2 authorize-security-group-ingress --group-id ${{ secrets.SECURITY_GROUP_ID }} --protocol tcp --port 22 --cidr $IP/32
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v2
+        with:
+          node-version: '20'
+
+      - name: Install dependencies and build frontend
+        run: |
+          cd front
+          npm install
+          npm run build
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v1
+        with:
+          java-version: '17'
+
+      - name: Build Spring Boot application
+        run: |
+          cd aws
+          chmod +x gradlew
+          ./gradlew clean build
+
+      - name: List built files
+        run: |
+          ls -l aws/build/libs/
+
+      - name: Deploy to EC2
+        run: |
+          echo "${{ secrets.SERVER_SSH_KEY }}" | base64 -d > $HOME/ParkSungho711.pem
+          chmod 400 $HOME/ParkSungho711.pem
+          scp -i $HOME/ParkSungho711.pem -o StrictHostKeyChecking=no aws/build/libs/aws-0.0.1-SNAPSHOT.war ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }}:~/app.war
+          ssh -i $HOME/ParkSungho711.pem -o StrictHostKeyChecking=no ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} 'bash ~/script.sh'
+        env:
+          SSH_USER: ${{ secrets.SERVER_USER }}
+          SSH_KNOWN_HOSTS: ${{ secrets.SERVER_HOST }}
+          SSH_PEM_KEY: ${{ secrets.SERVER_SSH_KEY }}
+
+      - name: Remove GitHub Actions IP from security group
+        if: always()
+        run: |
+          IP=$(curl -s http://checkip.amazonaws.com)
+          aws ec2 revoke-security-group-ingress --group-id ${{ secrets.SECURITY_GROUP_ID }} --protocol tcp --port 22 --cidr $IP/32
